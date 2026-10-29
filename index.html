@@ -612,7 +612,62 @@ const lvDesc = () => BANDDESC[BAND(P.dlv)] + (P.dlv%2===1 && P.dlv<8 ? ", pushed
 
 /* ================= capabilities ================= */
 const C = window.claude;
-const sampleP = C ? C.use("sample") : Promise.resolve(null);
+/* AI goes through our relay (relay/ in the repo), which holds the API key */
+// Relay deployed at https://red-pen-relay.red-pen-relay.workers.dev; put that URL here once the API key has credit
+const RELAY_URL = "";
+const IMG_LIMITS = {maxCount:5, mediaTypes:["image/jpeg","image/png","image/webp"]};
+function accessCode(){
+  let c = lsGet("rpe:code");
+  if(!c){ c = (prompt("Code d’accès à l’IA (à taper une seule fois sur cet appareil) :")||"").trim(); if(!c) throw {code:"cancelled"}; lsSet("rpe:code", c); }
+  return c;
+}
+async function imgBlock(file){
+  // Phone photos are huge: shrink to 1568px on the long side, which is all the model uses anyway
+  const bmp = await createImageBitmap(file); const k = Math.min(1, 1568/Math.max(bmp.width, bmp.height));
+  const cv = document.createElement("canvas"); cv.width = Math.round(bmp.width*k); cv.height = Math.round(bmp.height*k);
+  cv.getContext("2d").drawImage(bmp, 0, 0, cv.width, cv.height);
+  return {type:"image", source:{type:"base64", media_type:"image/jpeg", data:cv.toDataURL("image/jpeg", 0.85).split(",")[1]}};
+}
+async function relayCall(input, opts={}){
+  const messages = typeof input === "string" ? [{role:"user", content:input}] : input.map(m => ({role:m.role, content:m.content}));
+  if(opts.images && opts.images.length){
+    const imgs = await Promise.all(Array.from(opts.images).map(imgBlock));
+    messages[0] = {role:"user", content:[...imgs, {type:"text", text:String(messages[0].content)}]};
+  }
+  let res;
+  try { res = await fetch(RELAY_URL, {method:"POST", headers:{"content-type":"application/json", "x-access-code":accessCode()}, body:JSON.stringify({tier:opts.modelTier==="quick" ? "quick" : "default", messages})}); }
+  catch(e){ throw (e && e.code) ? e : {code:"network"}; }
+  if(res.status === 401){ lsSet("rpe:code", null); throw {code:"bad_code"}; }
+  if(!res.ok) throw {code: res.status === 429 ? "rate_limited" : "network"};
+  const reader = res.body.getReader(), dec = new TextDecoder();
+  let buf = "", text = "";
+  for(;;){
+    const {done, value} = await reader.read(); if(done) break;
+    buf += dec.decode(value, {stream:true});
+    let i;
+    while((i = buf.indexOf("\n\n")) >= 0){
+      const line = buf.slice(0, i); buf = buf.slice(i+2);
+      if(!line.startsWith("data: ")) continue;
+      const ev = JSON.parse(line.slice(6));
+      if(ev.error) throw {code:ev.error};
+      if(ev.t){ text += ev.t; if(opts.onText) opts.onText({text}); }
+      if(ev.done) return {text};
+    }
+  }
+  throw {code:"network"};
+}
+function parseJSON(text){
+  const s = String(text).replace(/^\s*```(?:json)?\s*/i, "").replace(/\s*```\s*$/, "");
+  try { return JSON.parse(s); } catch {}
+  const a = s.search(/[\[{]/), b = Math.max(s.lastIndexOf("}"), s.lastIndexOf("]"));
+  if(a >= 0 && b > a){ try { return JSON.parse(s.slice(a, b+1)); } catch {} }
+  throw {code:"invalid_json"};
+}
+const relay = Object.assign((input, opts) => relayCall(input, opts), {
+  json: async (input, opts) => parseJSON((await relayCall(input, opts)).text),
+  limits: async () => ({images:IMG_LIMITS})
+});
+const sampleP = Promise.resolve(RELAY_URL ? relay : null);
 async function ask(input, opts={}){ const f = await sampleP; if(!f) throw {code:"unavailable_here"}; return f(input, {cache:false, ...opts}); }
 async function askJSON(input, opts={}){ const f = await sampleP; if(!f) throw {code:"unavailable_here"}; return f.json(input, {cache:false, ...opts}); }
 function errMsg(e){
@@ -624,7 +679,10 @@ function errMsg(e){
     case "sampling_disabled": return "Claude n’est pas disponible pour ce compte.";
     case "invalid_json": return "La réponse est arrivée dans un format illisible. Réessaie.";
     case "refused": return "Claude n’a pas voulu répondre à ce message. Reformule-le.";
-    case "unavailable_here": return "L’IA n’est pas encore branchée sur cette version de l’appli. Les exercices, la dictée et le carnet marchent sans elle.";
+    case "unavailable_here": return "L’IA n’est pas activée dans cette version de l’appli. Pour la conversation, les articles et les corrections, utilise ta version dans Claude.";
+    case "bad_code": return "Code d’accès incorrect. Réessaie : l’appli te le redemandera.";
+    case "relay_key": return "La clé API du relais est invalide ou n’a plus de crédit.";
+    case "network": return "Impossible de joindre l’IA. Vérifie ta connexion et réessaie.";
     default: return "La connexion a échoué. Réessaie.";
   }
 }

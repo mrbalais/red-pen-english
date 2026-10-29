@@ -1,6 +1,6 @@
 // Red Pen English service worker.
 // Bump VERSION on every release so phones pick up the new files.
-const VERSION = "v1";
+const VERSION = "v2";
 const CACHE = "rpe-" + VERSION;
 const SHELL = ["./", "index.html", "manifest.webmanifest", "icons/icon-192.png", "icons/icon-512.png"];
 
